@@ -27,8 +27,8 @@
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSAccessibilityUsageDescription</key>
-    <string>Clipboard Win needs Accessibility access to detect the Shift+⌘+V hotkey and paste the item you pick into the frontmost app.</string>
+    <string>Clipboard Win needs Accessibility access to detect the Control+Shift+V hotkey and paste the item you pick into the frontmost app.</string>
     <key>NSInputMonitoringUsageDescription</key>
-    <string>Clipboard Win uses Input Monitoring to detect the global Shift+⌘+V hotkey.</string>
+    <string>Clipboard Win uses Input Monitoring to detect the global Control+Shift+V hotkey.</string>
 </dict>
 </plist>

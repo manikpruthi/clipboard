@@ -23,32 +23,39 @@ while IFS= read -r file; do SOURCES+=("$file"); done < <(find Sources -name '*.s
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
+# Compile both architectures in parallel; a release must contain both.
+PIDS=()
 BINARIES=()
 for ARCH in arm64 x86_64; do
     OUT="$BUILD_DIR/$APP_NAME-$ARCH"
+    BINARIES+=("$OUT")
     echo "Compiling ${#SOURCES[@]} Swift files for $ARCH-apple-macos$MIN_MACOS ($MODE)…"
-    if swiftc -swift-version 6 -sdk "$SDK" -target "$ARCH-apple-macos$MIN_MACOS" "${OPTIMIZATION[@]}" \
-        "${SOURCES[@]}" -o "$OUT"; then
-        BINARIES+=("$OUT")
-    else
-        echo "warning: skipping $ARCH (toolchain cannot target it)" >&2
-    fi
+    swiftc -swift-version 6 -sdk "$SDK" -target "$ARCH-apple-macos$MIN_MACOS" "${OPTIMIZATION[@]}" \
+        -module-cache-path "$BUILD_DIR/ModuleCache-$ARCH" \
+        "${SOURCES[@]}" -o "$OUT" &
+    PIDS+=($!)
 done
 
-if [ "${#BINARIES[@]}" -eq 0 ]; then
-    echo "error: no architectures built" >&2
+FAILED=0
+for PID in "${PIDS[@]}"; do
+    wait "$PID" || FAILED=1
+done
+if [ "$FAILED" -ne 0 ]; then
+    echo "error: compilation failed for at least one architecture" >&2
     exit 1
 fi
 
 lipo -create "${BINARIES[@]}" -output "$APP/Contents/MacOS/$APP_NAME"
-rm -f "${BINARIES[@]}"
-
-find "$APP" -name '*.dSYM' -type d -prune -exec rm -rf {} + 2>/dev/null || true
+rm -rf "${BINARIES[@]}" "$BUILD_DIR"/*.dSYM
 
 cp Resources/Info.plist "$APP/Contents/Info.plist"
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 
-codesign --force --deep --sign - "$APP" >/dev/null 2>&1 || true
+# Ad-hoc signatures default to a cdhash requirement, which changes on every build and makes
+# macOS forget the Accessibility grant. Pin the requirement to the bundle identifier instead so
+# the grant survives rebuilds.
+BUNDLE_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' Resources/Info.plist)"
+codesign --force --sign - --requirements "=designated => identifier \"$BUNDLE_ID\"" "$APP"
 
 touch "$BUILD_DIR/.metadata_never_index"
 echo "Built $APP"

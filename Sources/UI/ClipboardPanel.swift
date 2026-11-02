@@ -61,7 +61,6 @@ final class ClipboardPanel: NSPanel {
         tableView.delegate = self
         tableView.dataSource = self
         tableView.target = self
-        tableView.doubleAction = #selector(pasteSelected)
         tableView.action = #selector(tableClicked)
         tableView.menu = makeContextMenu()
 
@@ -85,6 +84,7 @@ final class ClipboardPanel: NSPanel {
         footerLabel.translatesAutoresizingMaskIntoConstraints = false
         footerLabel.font = .systemFont(ofSize: 11)
         footerLabel.textColor = .tertiaryLabelColor
+        footerLabel.stringValue = "↑↓ navigate  ·  ↩ paste  ·  ⌘P pin  ·  ⌘⌫ delete  ·  esc close"
 
         background.addSubview(searchField)
         background.addSubview(scrollView)
@@ -122,9 +122,9 @@ final class ClipboardPanel: NSPanel {
 
     private func makeContextMenu() -> NSMenu {
         let menu = NSMenu()
-        let pin = NSMenuItem(title: "Pin / Unpin", action: #selector(togglePinSelected), keyEquivalent: "")
+        let pin = NSMenuItem(title: "Pin / Unpin", action: #selector(togglePinClicked), keyEquivalent: "")
         pin.target = self
-        let remove = NSMenuItem(title: "Delete", action: #selector(deleteSelected), keyEquivalent: "")
+        let remove = NSMenuItem(title: "Delete", action: #selector(deleteClicked), keyEquivalent: "")
         remove.target = self
         menu.addItem(pin)
         menu.addItem(remove)
@@ -133,24 +133,41 @@ final class ClipboardPanel: NSPanel {
 
     private func installKeyMonitor() {
         NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard let self, self.isVisible else { return event }
-            if event.modifierFlags.contains(.command), event.charactersIgnoringModifiers == "p" {
-                self.togglePinSelected()
+            guard let self, self.isVisible, event.window === self else { return event }
+            let command = event.modifierFlags.contains(.command)
+            if command, event.charactersIgnoringModifiers == "p" {
+                self.togglePin(at: self.selectedIndex)
                 return nil
             }
             switch event.keyCode {
-            case 53: self.dismiss(); return nil
+            case 53: self.dismiss(restoreFocus: true); return nil
             case 125: self.moveSelection(1); return nil
             case 126: self.moveSelection(-1); return nil
             case 36, 76: self.pasteSelected(); return nil
-            case 51, 117: self.deleteSelected(); return nil
+            case 51, 117:
+                // Plain Delete edits the search text; it only removes an entry when there is
+                // no search text to edit, or with ⌘.
+                guard command || self.searchField.stringValue.isEmpty else { return event }
+                self.delete(at: self.selectedIndex)
+                return nil
             default: return event
             }
         }
     }
 
+    func toggle() {
+        if isVisible {
+            dismiss(restoreFocus: true)
+        } else {
+            show()
+        }
+    }
+
     func show() {
-        pasteTarget = NSWorkspace.shared.frontmostApplication
+        let frontmost = NSWorkspace.shared.frontmostApplication
+        if frontmost?.processIdentifier != ProcessInfo.processInfo.processIdentifier {
+            pasteTarget = frontmost
+        }
         items = HistoryService.shared.items
         filtered = items
         selectedIndex = 0
@@ -159,10 +176,7 @@ final class ClipboardPanel: NSPanel {
         positionOnActiveScreen()
         NSApp.activate(ignoringOtherApps: true)
         makeKeyAndOrderFront(nil)
-        searchField.becomeFirstResponder()
-        if !filtered.isEmpty {
-            tableView.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
-        }
+        makeFirstResponder(searchField)
     }
 
     private func positionOnActiveScreen() {
@@ -185,7 +199,6 @@ final class ClipboardPanel: NSPanel {
         }
         emptyLabel.isHidden = !filtered.isEmpty
         emptyLabel.stringValue = items.isEmpty ? "No clipboard history yet" : "No matches"
-        footerLabel.stringValue = "↑↓ navigate  ·  ↩ paste  ·  ⌘P pin  ·  ⌫ delete  ·  esc close"
     }
 
     private func moveSelection(_ delta: Int) {
@@ -195,11 +208,6 @@ final class ClipboardPanel: NSPanel {
         tableView.scrollRowToVisible(selectedIndex)
     }
 
-    private var contextIndex: Int {
-        let row = tableView.clickedRow
-        return row >= 0 ? row : selectedIndex
-    }
-
     @objc private func tableClicked() {
         let row = tableView.clickedRow
         guard row >= 0, row < filtered.count else { return }
@@ -207,20 +215,33 @@ final class ClipboardPanel: NSPanel {
         pasteSelected()
     }
 
-    @objc private func togglePinSelected() {
-        let index = contextIndex
-        guard index >= 0, index < filtered.count else { return }
-        HistoryService.shared.togglePin(filtered[index].id)
-        items = HistoryService.shared.items
-        applyFilter()
+    @objc private func togglePinClicked() {
+        togglePin(at: tableView.clickedRow)
     }
 
-    @objc private func deleteSelected() {
-        let index = contextIndex
+    @objc private func deleteClicked() {
+        delete(at: tableView.clickedRow)
+    }
+
+    private func togglePin(at index: Int) {
+        guard index >= 0, index < filtered.count else { return }
+        let id = filtered[index].id
+        HistoryService.shared.togglePin(id)
+        items = HistoryService.shared.items
+        applyFilter()
+        // Follow the entry to its new position.
+        selectedIndex = filtered.firstIndex { $0.id == id } ?? 0
+        reload()
+    }
+
+    private func delete(at index: Int) {
         guard index >= 0, index < filtered.count else { return }
         HistoryService.shared.delete(filtered[index].id)
         items = HistoryService.shared.items
         applyFilter()
+        // Keep the selection where it was; reload() clamps it to the last row.
+        selectedIndex = index
+        reload()
     }
 
     @objc private func pasteSelected() {
@@ -229,23 +250,27 @@ final class ClipboardPanel: NSPanel {
     }
 
     private func paste(_ item: ClipboardItem) {
-        dismiss()
         HistoryService.shared.paste(item)
-        guard HotkeyService.hasAccessibilityAccess else { return }
-        pasteTarget?.activate(options: [])
+        // Without Accessibility the item is only placed on the clipboard; focus still returns.
+        let canPaste = HotkeyService.hasAccessibilityAccess && pasteTarget?.isTerminated == false
+        dismiss(restoreFocus: true)
+        guard canPaste else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
             ClipboardItem.simulatePaste()
         }
     }
 
-    private func dismiss() {
+    private func dismiss(restoreFocus: Bool) {
         orderOut(nil)
+        if restoreFocus, let target = pasteTarget, !target.isTerminated {
+            target.activate(options: [])
+        }
     }
 
     private func applyFilter() {
-        let query = searchField.stringValue.trimmingCharacters(in: .whitespaces).lowercased()
+        let query = searchField.stringValue.trimmingCharacters(in: .whitespaces)
         filtered = query.isEmpty ? items : items.filter {
-            $0.preview.lowercased().contains(query) || ($0.text?.lowercased().contains(query) ?? false)
+            ($0.text ?? $0.preview).localizedCaseInsensitiveContains(query)
         }
         selectedIndex = 0
         reload()
@@ -264,14 +289,19 @@ extension ClipboardPanel: NSTableViewDataSource, NSTableViewDelegate {
     }
 
     func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
-        HoverTableRowView()
+        let identifier = NSUserInterfaceItemIdentifier("HoverRow")
+        if let reused = tableView.makeView(withIdentifier: identifier, owner: nil) as? HoverTableRowView {
+            return reused
+        }
+        let rowView = HoverTableRowView()
+        rowView.identifier = identifier
+        return rowView
     }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         let identifier = NSUserInterfaceItemIdentifier("HistoryCell")
         let cell = tableView.makeView(withIdentifier: identifier, owner: nil) as? HistoryCellView
             ?? HistoryCellView(identifier: identifier)
-        cell.frame.size.width = tableView.bounds.width
         cell.configure(with: filtered[row])
         return cell
     }
@@ -332,8 +362,8 @@ private final class HistoryCellView: NSTableCellView {
         label.stringValue = item.preview
         pinLabel.isHidden = !item.pinned
 
-        if item.type == .image, let data = item.imageData, let image = NSImage(data: data) {
-            iconView.image = image
+        if item.type == .image, let thumbnail = item.thumbnail {
+            iconView.image = thumbnail
             iconView.isHidden = false
             iconWidth.constant = 34
             iconHeight.constant = 34
@@ -362,9 +392,21 @@ private final class HoverTableRowView: NSTableRowView {
         didSet { applyBackground() }
     }
 
-    private func applyBackground() {
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
         wantsLayer = true
         layer?.cornerRadius = 8
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func prepareForReuse() {
+        super.prepareForReuse()
+        hovered = false
+    }
+
+    private func applyBackground() {
         let color: NSColor
         if isSelected {
             color = NSColor.controlAccentColor.withAlphaComponent(isEmphasized ? 0.28 : 0.18)

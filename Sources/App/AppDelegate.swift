@@ -12,12 +12,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem?.button {
             button.image = NSImage(systemSymbolName: "doc.on.clipboard", accessibilityDescription: "Clipboard Win")
-            button.toolTip = "Clipboard Win (Shift+⌘+V)"
+            button.toolTip = "Clipboard Win (Control+Shift+V)"
         }
 
         let menu = NSMenu()
         let showItem = NSMenuItem(title: "Show Clipboard History", action: #selector(showClipboard), keyEquivalent: "v")
-        showItem.keyEquivalentModifierMask = [.command, .shift]
+        showItem.keyEquivalentModifierMask = [.control, .shift]
         showItem.target = self
         menu.addItem(showItem)
 
@@ -39,10 +39,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         _ = HistoryService.shared
 
         let hotkey = HotkeyService.shared
-        hotkey.onHotkey = { [weak self] in self?.showClipboard() }
-        hotkey.onUnavailable = { [weak self] in self?.updatePermissionState() }
+        hotkey.onHotkey = { [weak self] in self?.panel.toggle() }
+        hotkey.onStateChange = { [weak self] in self?.refreshPermissionItem() }
         hotkey.start()
-        updatePermissionState()
+        if !HotkeyService.hasRequiredAccess {
+            // Without access the hotkey silently does nothing, so ask up front.
+            HotkeyService.requestAccess()
+        }
 
         NotificationCenter.default.addObserver(
             self,
@@ -53,25 +56,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func applicationDidBecomeActive() {
-        updatePermissionState()
+        refreshPermissionItem()
+        HotkeyService.shared.start()
     }
 
-    private func updatePermissionState() {
-        let trusted = HotkeyService.hasAccessibilityAccess
-        permissionItem?.title = trusted ? "Accessibility Access Granted ✓" : "Grant Accessibility Access…"
-        permissionItem?.isEnabled = !trusted
-        if trusted && !HotkeyService.shared.isRunning {
-            HotkeyService.shared.start()
+    private func refreshPermissionItem() {
+        let title: String
+        if !HotkeyService.hasAccessibilityAccess {
+            title = "Grant Accessibility Access…"
+        } else if !HotkeyService.hasInputMonitoringAccess {
+            title = "Grant Input Monitoring Access…"
+        } else {
+            title = "Permissions Granted ✓"
         }
+        permissionItem?.title = title
+        permissionItem?.isEnabled = !HotkeyService.hasRequiredAccess
     }
 
     @objc private func requestAccess() {
-        HotkeyService.requestAccessibilityAccess()
-        openAccessibilitySettings()
+        HotkeyService.requestAccess()
+        openPrivacySettings()
     }
 
-    private func openAccessibilitySettings() {
-        guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") else { return }
+    private func openPrivacySettings() {
+        let pane = HotkeyService.hasAccessibilityAccess ? "Privacy_ListenEvent" : "Privacy_Accessibility"
+        guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?\(pane)") else { return }
         NSWorkspace.shared.open(url)
     }
 
